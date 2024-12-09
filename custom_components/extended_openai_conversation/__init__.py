@@ -173,35 +173,20 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
     async def async_process(
         self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
-        raw_prompt = self.entry.options.get(CONF_PROMPT, DEFAULT_PROMPT)
         exposed_entities = self.get_exposed_entities()
-
         if user_input.conversation_id in self.history:
             conversation_id = user_input.conversation_id
             messages = self.history[conversation_id]
+            prompt = await self._get_system_prompt(user_input, exposed_entities)
+            for i in range(len(messages)):
+                if messages[i]['role'] == 'system':
+                    messages[i] = {"role": "system", "content": prompt}
+            else:
+                messages[0] = {"role": "system", "content": prompt}
         else:
             conversation_id = ulid.ulid()
             user_input.conversation_id = conversation_id
-            try:
-                user = await self.hass.auth.async_get_user(user_input.context.user_id)
-                prompt = self._async_generate_prompt(raw_prompt, exposed_entities)
-                if self.entry.options.get(CONF_RAG_API, DEFAULT_RAG_API):
-                    rag_api_response = await self.call_rag_api(user_input.text, user.name)
-                    prompt = prompt.replace('{RAG_API_OUTPUT}', rag_api_response)
-                if self.entry.options.get(CONF_ATTACH_USERNAME_TO_PROMPT, DEFAULT_ATTACH_USERNAME_TO_PROMPT):
-                    if user is not None and user.name is not None:
-                        if self.entry.options.get(CONF_ATTACH_USERNAME_TO_PROMPT, DEFAULT_ATTACH_USERNAME_TO_PROMPT):
-                            prompt = f"User's name: {user.name}\n" + prompt
-            except TemplateError as err:
-                _LOGGER.error("Error rendering prompt: %s", err)
-                intent_response = intent.IntentResponse(language=user_input.language)
-                intent_response.async_set_error(
-                    intent.IntentResponseErrorCode.UNKNOWN,
-                    f"Sorry, I had a problem with my template: {err}",
-                )
-                return conversation.ConversationResult(
-                    response=intent_response, conversation_id=conversation_id
-                )
+            prompt = await self._get_system_prompt(user_input, exposed_entities)
             messages = [{"role": "system", "content": prompt}]
         user_message = {"role": "user", "content": user_input.text}
         if self.entry.options.get(CONF_ATTACH_USERNAME, DEFAULT_ATTACH_USERNAME):
@@ -245,6 +230,30 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
+
+    async def _get_system_prompt(self, user_input, exposed_entities):
+        raw_prompt = self.entry.options.get(CONF_PROMPT, DEFAULT_PROMPT)
+        try:
+            user = await self.hass.auth.async_get_user(user_input.context.user_id)
+            prompt = self._async_generate_prompt(raw_prompt, exposed_entities)
+            if self.entry.options.get(CONF_RAG_API, DEFAULT_RAG_API):
+                rag_api_response = await self.call_rag_api(user_input.text, user.name)
+                prompt = prompt.replace('{RAG_API_OUTPUT}', rag_api_response)
+            if self.entry.options.get(CONF_ATTACH_USERNAME_TO_PROMPT, DEFAULT_ATTACH_USERNAME_TO_PROMPT):
+                if user is not None and user.name is not None:
+                    if self.entry.options.get(CONF_ATTACH_USERNAME_TO_PROMPT, DEFAULT_ATTACH_USERNAME_TO_PROMPT):
+                        prompt = f"User's name: {user.name}\n" + prompt
+            return prompt
+        except Exception as err:
+            _LOGGER.error("Error rendering prompt: %s", err)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Sorry, I had a problem with my template: {err}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
 
     def _async_generate_prompt(self, raw_prompt: str, exposed_entities) -> str:
         """Generate a prompt for the user."""
@@ -312,16 +321,18 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
         top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
         temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        functions = list(map(lambda s: s["spec"], self.get_functions()))
-        function_call = "auto"
+        # functions = list(map(lambda s: s["spec"], self.get_functions()))
+        # function_call = "auto"
+        functions = None
+        function_call = None
         if n_requests == self.entry.options.get(
             CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
             DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
         ):
             function_call = "none"
-        if len(functions) == 0:
-            functions = None
-            function_call = None
+        #if len(functions) == 0:
+        functions = None
+        function_call = None
 
         _LOGGER.info("Prompt for %s: %s", model, messages)
 
@@ -339,10 +350,10 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         choice: Choice = response.choices[0]
         message = choice.message
         services_called = []
-        if choice.finish_reason == "function_call":
-            message = await self.execute_function_call(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
+        # if choice.finish_reason == "function_call":
+        #     message = await self.execute_function_call(
+        #         user_input, messages, message, exposed_entities, n_requests + 1
+        #     )
 
         # the LLM likes returning backslashes for some reason
         message.content = message.content.replace('\\', '')
@@ -475,14 +486,14 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
                 secret_token = secrets['rag_api_tokens'][user_name]
                 headers['Authorization'] = f'Bearer {secret_token}'
 
-            response = await client.post(url, headers=headers, json=data)
+            response = await client.post(url, headers=headers, data=json.dumps(data))
 
             if response.status_code == httpx.codes.OK:
                 response_data = response.json()
                 return response_data.get("prompt", "")
             else:
-                _LOGGER.warning(f'Bad response code {response.status_code} from the RAG API!')
-                return ""
+                _LOGGER.warning(f'Bad response code {response.status_code} from the RAG API! Used prompt {prompt} for user {user_name}')
+                raise RuntimeError(f'Bad response code {response.status_code} from the RAG API!')
 
     async def send_to_data_logger(self, messages, response):
         url = self.entry.options.get(CONF_DATA_LOGGER_URL)
@@ -514,7 +525,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         return valid_jsons
 
     def remove_json_objects(self, text):
-        json_pattern = r'\{.*?\}'
+        json_pattern = r'\{.*\}'
         text_without_json = re.sub(json_pattern, '', text)
         return text_without_json
 
