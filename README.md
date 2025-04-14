@@ -1,4 +1,7 @@
 # Extended OpenAI Conversation
+
+**I have rewritten my entire RAG code into a fork of openai_conversation instead of using extended_openai_conversation, which can be found [here](https://github.com/JohnTheNerd/rag_openai_conversation). I will no longer be maintaining this repository.**
+
 This is custom component of Home Assistant.
 
 Derived from [OpenAI Conversation](https://www.home-assistant.io/integrations/openai_conversation/) with some new features such as call-service.
